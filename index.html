@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rock Mine</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<style>
+  :root { color-scheme: light dark; }
+  *, *::before, *::after {
+    box-sizing: border-box;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-drag: none;
+  }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #2b2b2b;
+    touch-action: none; overscroll-behavior: none;
+    font-family: sans-serif;
+  }
+  #stage { position: fixed; inset: 0; touch-action: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #overlay {
+    position: fixed; inset: 0; background: #9a9a9a; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none; cursor: pointer;
+  }
+  #overlay svg { width: 22vmin; height: 22vmin; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<div id="overlay"><svg viewBox="0 0 100 100"><polygon points="20,8 92,50 20,92" fill="#000"/></svg></div>
+
+<script>
+(() => {
+  // ---------- lockdown ----------
+  const block = e => { e.preventDefault(); };
+  ['contextmenu','selectstart','dragstart','gesturestart','gesturechange','gestureend','copy','cut','paste','dblclick'].forEach(t =>
+    document.addEventListener(t, block, { passive: false }));
+  ['touchstart','touchmove','touchend','touchcancel'].forEach(t =>
+    document.addEventListener(t, block, { passive: false }));
+  document.addEventListener('wheel', e => e.preventDefault(), { passive: false });
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey) e.preventDefault();
+  }, { passive: false });
+
+  // ---------- setup ----------
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initCartPositions();
+  }
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const TAU = Math.PI * 2;
+
+  // ---------- state ----------
+  let rocks = [];      // in z-order, last on top
+  let shapes = [];     // golden shapes loose
+  let frags = [];      // animation fragments
+  let carts = [{ items: [] }, { items: [] }];
+  let zCounter = 0;
+  let started = false;
+
+  const SHAPE_TYPES = ['circle', 'triangle', 'square', 'rectangle', 'star', 'heart'];
+
+  function cartRect(i) {
+    const m = Math.max(10, Math.min(W, H) * 0.02);
+    const w = W / 6 - m;
+    return { x: i === 0 ? m : W - m - w, y: m, w, h: H - m * 2 };
+  }
+  function initCartPositions() {
+    // keep shapes in carts positioned
+    carts.forEach((c, i) => {
+      c.items.forEach(it => { clampToCart(it, i); });
+    });
+  }
+  function clampToCart(it, i) {
+    const r = cartRect(i), t = r.w * 0.27, pad = it.size + 4;
+    it.x = Math.max(r.x + t + pad, Math.min(r.x + r.w - t - pad, it.x));
+    it.y = Math.max(r.y + t + pad, Math.min(r.y + r.h - t - pad, it.y));
+  }
+
+  function rockBounds() {
+    const a = cartRect(0), b = cartRect(1);
+    return { l: a.x + a.w, r: b.x };
+  }
+  function clampRock(r) {
+    const bd = rockBounds(), e = r.r * 1.05 + 4;
+    r.x = Math.max(bd.l + e, Math.min(bd.r - e, r.x));
+  }
+
+  // ---------- rocks ----------
+  function makeRock(x, y, baseR) {
+    const n = 6 + Math.floor(Math.random() * 3);
+    const pts = [];
+    const rot0 = rand(0, TAU);
+    for (let i = 0; i < n; i++) {
+      const a = rot0 + (i / n) * TAU + rand(-0.2, 0.2);
+      const r = baseR * rand(0.72, 1.05);
+      pts.push([Math.cos(a) * r, Math.sin(a) * r]);
+    }
+    const tone = rand(0, 1);
+    return {
+      x, y, r: baseR, pts, tone,
+      rot: rand(0, TAU),
+      z: zCounter++,
+      content: Math.random() < 0.5 ? null : SHAPE_TYPES[Math.floor(Math.random() * 6)],
+      breaking: false
+    };
+  }
+
+  function buildPile(roll) {
+    rocks = []; zCounter = 0;
+    const bd = rockBounds();
+    const left = bd.l, right = bd.r;
+    const pw = right - left;
+    const base = Math.max(34, Math.min(W, H) / 11);
+    const count = Math.round((pw * H) / (base * base * 1.25) / 3);
+    for (let i = 0; i < count; i++) {
+      const x = left + rand(-base * 0.2, pw + base * 0.2);
+      const y = rand(-base * 0.2, H + base * 0.2);
+      const r = base * rand(0.7, 1.2);
+      const rk = makeRock(x, y, r);
+      clampRock(rk);
+      if (roll) {
+        rk.ty = rk.y;
+        rk.y = -rk.r * rand(1.2, 2.5) - rand(0, H * 0.7);
+        rk.entering = true;
+      }
+      rocks.push(rk);
+    }
+    // random z-order
+    rocks.sort(() => Math.random() - 0.5);
+    rocks.forEach((r, i) => r.z = i);
+    zCounter = rocks.length;
+  }
+
+  function rockColors(t, shade) {
+    // t: 0..1 tone variance; shade: -1..1 depth lightness
+    const h = 24 + t * 8;
+    const s = 28 + t * 14;
+    const l = 26 + t * 14 + shade * 8;
+    return { base: `hsl(${h} ${s}% ${l}%)`, light: `hsl(${h} ${s}% ${l + 12}%)`, dark: `hsl(${h} ${s}% ${Math.max(8, l - 12)}%)` };
+  }
+
+  function drawRock(r) {
+    const c = rockColors(r.tone, 0);
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.rot);
+    // drop shadow
+    ctx.save();
+    ctx.translate(3, 5);
+    ctx.beginPath();
+    r.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fill();
+    ctx.restore();
+    // body
+    ctx.beginPath();
+    r.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath();
+    ctx.fillStyle = c.base;
+    ctx.fill();
+    // facets (triangles fan from center, lit from top-left)
+    const n = r.pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = r.pts[i], b = r.pts[(i + 1) % n];
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      // world-space normal angle
+      const ang = Math.atan2(my, mx) + r.rot;
+      const light = Math.cos(ang - (-Math.PI * 0.75)); // light from top-left
+      ctx.beginPath();
+      ctx.moveTo(r.x * 0, 0);
+      ctx.lineTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.closePath();
+      ctx.fillStyle = light > 0 ? `rgba(255,235,200,${light * 0.22})` : `rgba(0,0,0,${-light * 0.3})`;
+      ctx.fill();
+    }
+    // inner highlight top facet
+    ctx.beginPath();
+    r.pts.forEach((p, i) => { const q = [p[0] * 0.55, p[1] * 0.55]; i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,240,215,0.07)';
+    ctx.fill();
+    // outline
+    ctx.beginPath();
+    r.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+    ctx.closePath();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = c.dark;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------- golden shapes ----------
+  function shapePath(type, s) {
+    ctx.beginPath();
+    switch (type) {
+      case 'circle': ctx.arc(0, 0, s, 0, TAU); break;
+      case 'triangle':
+        ctx.moveTo(0, -s); ctx.lineTo(s * 0.95, s * 0.8); ctx.lineTo(-s * 0.95, s * 0.8); ctx.closePath(); break;
+      case 'square': ctx.rect(-s * 0.8, -s * 0.8, s * 1.6, s * 1.6); break;
+      case 'rectangle': ctx.rect(-s * 1.1, -s * 0.6, s * 2.2, s * 1.2); break;
+      case 'star':
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + i * Math.PI / 5;
+          const r = i % 2 ? s * 0.45 : s;
+          i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        ctx.closePath(); break;
+      case 'heart':
+        ctx.moveTo(0, s * 0.85);
+        ctx.bezierCurveTo(-s * 1.3, s * 0.1, -s * 0.9, -s * 0.95, 0, -s * 0.35);
+        ctx.bezierCurveTo(s * 0.9, -s * 0.95, s * 1.3, s * 0.1, 0, s * 0.85);
+        ctx.closePath(); break;
+    }
+  }
+  function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+  function glint(x, y, sz, a) {
+    if (a <= 0) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.globalAlpha = a;
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, sz * 0.7);
+    g.addColorStop(0, 'rgba(255,255,255,0.9)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, sz * 0.7, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff';
+    const L = sz * (0.4 + 0.6 * a), w = sz * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(0, -L); ctx.lineTo(w, 0); ctx.lineTo(0, L); ctx.lineTo(-w, 0); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-L, 0); ctx.lineTo(0, w); ctx.lineTo(L, 0); ctx.lineTo(0, -w); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function twinkle(it) {
+    if (it.seed === undefined) it.seed = Math.random() * 10;
+    const t = performance.now() / 1000;
+    for (let k = 0; k < 2; k++) {
+      const period = 5 + k * 3.7;
+      const u = t / period + it.seed + k * 0.37;
+      const cycle = Math.floor(u), ph = u - cycle;
+      if (ph > 0.12) continue;
+      const a = Math.sin((ph / 0.12) * Math.PI) * 0.85;
+      const ang = hash(cycle * 3 + k + it.seed) * TAU;
+      const rad = hash(cycle * 5 + k * 2 + it.seed) * it.size * 0.75;
+      glint(it.x + Math.cos(ang) * rad, it.y + Math.sin(ang) * rad, it.size * 0.9, a);
+    }
+  }
+  function drawShape(it) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rot || 0);
+    const s = it.size;
+    ctx.save();
+    ctx.translate(2, 3);
+    shapePath(it.type, s);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fill();
+    ctx.restore();
+    shapePath(it.type, s);
+    const g = ctx.createLinearGradient(-s, -s, s, s);
+    g.addColorStop(0, '#fff1a0'); g.addColorStop(0.45, '#ffc800'); g.addColorStop(1, '#b8860b');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#8a6200';
+    ctx.stroke();
+    // moving shine band
+    ctx.save();
+    shapePath(it.type, s);
+    ctx.clip();
+    const cyc = (performance.now() / 12000) + (it.seed || 0) * 0.1;
+    const ph = (cyc % 1) / 0.3;
+    const bx = -s * 1.6 + Math.min(1, ph) * s * 3.6;
+    const sg = ctx.createLinearGradient(bx - s * 0.35, -s, bx + s * 0.35, s);
+    sg.addColorStop(0, 'rgba(255,255,255,0)');
+    sg.addColorStop(0.5, 'rgba(255,255,255,0.35)');
+    sg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sg;
+    if (ph < 1) ctx.fillRect(-s * 2, -s * 2, s * 4, s * 4);
+    ctx.restore();
+    ctx.restore();
+    twinkle(it);
+  }
+
+  // ---------- minecarts ----------
+  function cartInset(r) { return r.w * 0.27; }
+  function drawCart(i) {
+    const r = cartRect(i), t = cartInset(r);
+    const x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+    const ix0 = x0 + t, iy0 = y0 + t, ix1 = x1 - t, iy1 = y1 - t;
+    const poly = (pts, col) => {
+      ctx.beginPath();
+      pts.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+      ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+    };
+    poly([[x0, y0], [ix0, iy0], [ix0, iy1], [x0, y1]], '#4a4a4a'); // left wall
+    poly([[x0, y0], [x1, y0], [ix1, iy0], [ix0, iy0]], '#666666'); // top wall
+    poly([[x1, y0], [x1, y1], [ix1, iy1], [ix1, iy0]], '#b3b3b3'); // right wall
+    poly([[x0, y1], [x1, y1], [ix1, iy1], [ix0, iy1]], '#999999'); // bottom wall
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(ix0, iy0, ix1 - ix0, iy1 - iy0); // floor
+  }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ---------- break animation ----------
+  function breakRock(rock) {
+    if (rock.breaking) return;
+    rock.breaking = true;
+    const n = rock.pts.length;
+    // fragments: wedges from center
+    for (let i = 0; i < n; i++) {
+      const a = rock.pts[i], b = rock.pts[(i + 1) % n];
+      const mx = (a[0] + b[0]) / 3, my = (a[1] + b[1]) / 3;
+      const ang = Math.atan2(my, mx) + rock.rot;
+      const sp = rand(40, 110);
+      frags.push({
+        pts: [[0, 0], a, b], x: rock.x, y: rock.y, rot: rock.rot,
+        vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        vr: rand(-4, 4), life: 0, max: rand(0.7, 1.0),
+        tone: rock.tone, scale: 1
+      });
+    }
+    // dust
+    for (let i = 0; i < 10; i++) {
+      const ang = rand(0, TAU), sp = rand(20, 90);
+      frags.push({ dust: true, x: rock.x, y: rock.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        life: 0, max: rand(0.4, 0.7), size: rand(3, 8) });
+    }
+    // reveal content after fracture start
+    const type = rock.content;
+    setTimeout(() => {
+      if (type) {
+        const it = { type, x: rock.x, y: rock.y, size: Math.max(16, rock.r * 0.45), rot: rand(-0.3, 0.3), z: zCounter++, pop: 0 };
+        shapes.push(it);
+      }
+    }, 180);
+    // remove rock after short hold
+    rock.fade = 0;
+  }
+
+  let emptyT = 0;
+  function updateFrags(dt) {
+    if (rocks.length === 0) {
+      emptyT += dt;
+      if (emptyT > 0.8) { buildPile(true); emptyT = 0; }
+    } else emptyT = 0;
+    rocks.forEach(r => {
+      if (!r.entering) return;
+      const dy = r.ty - r.y;
+      let step = Math.max(60, Math.min(dy * 4, H * 1.1)) * dt;
+      if (step >= dy) { step = dy; r.entering = false; }
+      r.y += step;
+      r.rot += step / r.r;
+    });
+    for (let i = frags.length - 1; i >= 0; i--) {
+      const f = frags[i];
+      f.life += dt;
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      f.vx *= 0.97; f.vy *= 0.97;
+      if (!f.dust) f.rot += f.vr * dt;
+      if (f.life >= f.max) frags.splice(i, 1);
+    }
+    for (let i = rocks.length - 1; i >= 0; i--) {
+      const r = rocks[i];
+      if (r.breaking) {
+        r.fade += dt;
+        if (r.fade > 0.12) rocks.splice(i, 1);
+      }
+    }
+    shapes.forEach(s => { if (s.pop !== undefined && s.pop < 1) s.pop = Math.min(1, s.pop + dt * 5); });
+  }
+
+  function drawFrags() {
+    frags.forEach(f => {
+      const k = f.life / f.max;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - k);
+      if (f.dust) {
+        ctx.fillStyle = 'rgba(190,170,140,0.7)';
+        ctx.beginPath(); ctx.arc(f.x, f.y, f.size * (1 + k), 0, TAU); ctx.fill();
+      } else {
+        ctx.translate(f.x, f.y + k * k * 60);
+        ctx.rotate(f.rot);
+        const sc = 1 - k * 0.35;
+        ctx.scale(sc, sc);
+        const c = rockColors(f.tone, -0.3);
+        ctx.beginPath();
+        f.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+        ctx.closePath();
+        ctx.fillStyle = c.base; ctx.fill();
+        ctx.strokeStyle = c.dark; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }
+
+  // ---------- rendering ----------
+  function drawBackground() {
+    ctx.fillStyle = '#2a2623';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function render() {
+    drawBackground();
+    drawCart(0); drawCart(1);
+    // cart contents
+    carts.forEach(c => c.items.forEach(drawShape));
+    // rocks sorted by z
+    rocks.slice().sort((a, b) => a.z - b.z).forEach(r => {
+      if (r.breaking) {
+        ctx.save(); ctx.globalAlpha = Math.max(0, 1 - r.fade / 0.12);
+        drawRock(r); ctx.restore();
+      } else drawRock(r);
+    });
+    // loose shapes (above rocks unless being dragged)
+    shapes.slice().sort((a, b) => a.z - b.z).forEach(it => {
+      if (it.pop !== undefined && it.pop < 1) {
+        ctx.save(); ctx.translate(it.x, it.y); const s = 0.4 + 0.6 * it.pop;
+        ctx.scale(s, s); ctx.translate(-it.x, -it.y); drawShape(it); ctx.restore();
+      } else drawShape(it);
+    });
+    drawFrags();
+  }
+
+  // ---------- input ----------
+  const pointers = new Map(); // id -> {target, kind, dx, dy}
+  const lastTap = new Map();  // rock -> time (for double tap)
+  let lastTapGlobal = { t: 0, x: 0, y: 0, rock: null };
+
+  function pointInPoly(rock, px, py) {
+    // transform to local
+    const dx = px - rock.x, dy = py - rock.y;
+    const c = Math.cos(-rock.rot), s = Math.sin(-rock.rot);
+    const lx = dx * c - dy * s, ly = dx * s + dy * c;
+    let inside = false;
+    const p = rock.pts;
+    for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+      const xi = p[i][0], yi = p[i][1], xj = p[j][0], yj = p[j][1];
+      if (((yi > ly) !== (yj > ly)) && (lx < (xj - xi) * (ly - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function hitShape(px, py) {
+    const arr = shapes.slice().sort((a, b) => b.z - a.z);
+    for (const it of arr) if (Math.hypot(px - it.x, py - it.y) < it.size * 1.15 + 6) return it;
+    return null;
+  }
+  function hitCartShape(px, py) {
+    for (let i = 0; i < 2; i++) {
+      const items = carts[i].items;
+      for (let k = items.length - 1; k >= 0; k--) {
+        const it = items[k];
+        if (Math.hypot(px - it.x, py - it.y) < it.size * 1.15 + 6) return { it, cart: i, idx: k };
+      }
+    }
+    return null;
+  }
+  function hitRock(px, py) {
+    const arr = rocks.filter(r => !r.breaking && !r.entering).sort((a, b) => b.z - a.z);
+    for (const r of arr) if (pointInPoly(r, px, py)) return r;
+    return null;
+  }
+
+  function pos(e) { return { x: e.clientX, y: e.clientY }; }
+
+  cv.addEventListener('pointerdown', e => {
+    if (!started) return;
+    e.preventDefault();
+    cv.setPointerCapture(e.pointerId);
+    const { x, y } = pos(e);
+    let target = null, kind = null, extra = {};
+
+    const sh = hitShape(x, y);
+    if (sh) { target = sh; kind = 'shape'; sh.z = zCounter++; }
+    else {
+      const cs = hitCartShape(x, y);
+      if (cs) {
+        target = cs.it; kind = 'shape';
+        carts[cs.cart].items.splice(cs.idx, 1);
+        target.z = zCounter++; target.pop = undefined;
+        shapes.push(target);
+      } else {
+        const r = hitRock(x, y);
+        if (r) {
+          target = r; kind = 'rock';
+          // double-tap detect
+          const now = performance.now();
+          if (lastTapGlobal.rock === r && now - lastTapGlobal.t < 380 && Math.hypot(x - lastTapGlobal.x, y - lastTapGlobal.y) < 30) {
+            breakRock(r);
+            lastTapGlobal = { t: 0, x: 0, y: 0, rock: null };
+            return;
+          }
+          r.z = zCounter++;
+          extra.startX = x; extra.startY = y; extra.moved = false;
+        }
+      }
+    }
+    if (target) pointers.set(e.pointerId, { target, kind, dx: target.x - x, dy: target.y - y, ...extra });
+  }, { passive: false });
+
+  cv.addEventListener('pointermove', e => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    e.preventDefault();
+    const { x, y } = pos(e);
+    p.target.x = x + p.dx;
+    p.target.y = y + p.dy;
+    if (p.kind === 'rock') clampRock(p.target);
+    if (p.kind === 'rock' && Math.hypot(x - p.startX, y - p.startY) > 8) p.moved = true;
+  }, { passive: false });
+
+  function endPointer(e) {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    pointers.delete(e.pointerId);
+    const t = p.target;
+    if (p.kind === 'rock') {
+      if (!p.moved) lastTapGlobal = { t: performance.now(), x: e.clientX, y: e.clientY, rock: t };
+      else lastTapGlobal = { t: 0, x: 0, y: 0, rock: null };
+    } else if (p.kind === 'shape') {
+      let ci = -1;
+      for (let k = 0; k < 2; k++) {
+        const cr = cartRect(k);
+        if (t.x >= cr.x && t.x <= cr.x + cr.w && t.y >= cr.y && t.y <= cr.y + cr.h) ci = k;
+      }
+      if (ci >= 0) {
+        const idx = shapes.indexOf(t);
+        if (idx >= 0) shapes.splice(idx, 1);
+        clampToCart(t, ci);
+        t.pop = undefined;
+        carts[ci].items.push(t);
+
+      }
+    }
+  }
+  cv.addEventListener('pointerup', endPointer);
+  cv.addEventListener('pointercancel', endPointer);
+  cv.addEventListener('lostpointercapture', endPointer);
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    updateFrags(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- start ----------
+  const overlay = document.getElementById('overlay');
+  function goFullscreen() {
+    const el = document.documentElement;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+    if (fn) { try { const r = fn.call(el, { navigationUI: 'hide' }); if (r && r.catch) r.catch(() => {}); } catch (_) {} }
+  }
+  overlay.addEventListener('pointerup', e => {
+    e.preventDefault();
+    if (started) return;
+    started = true;
+    goFullscreen();
+    overlay.style.display = 'none';
+  }, { passive: false });
+
+  window.addEventListener('resize', () => {
+    const oldW = W, oldH = H;
+    resize();
+    if (oldW && (oldW !== W || oldH !== H)) {
+      const sx = W / oldW, sy = H / oldH;
+      rocks.forEach(r => { r.x *= sx; r.y *= sy; clampRock(r); });
+      shapes.forEach(s => { s.x *= sx; s.y *= sy; });
+    }
+  });
+
+  resize();
+  buildPile();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
