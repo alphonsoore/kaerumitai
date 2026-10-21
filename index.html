@@ -122,8 +122,8 @@
     const bd = rockBounds();
     const left = bd.l, right = bd.r;
     const pw = right - left;
-    const base = Math.max(34, Math.min(W, H) / 11);
-    const count = Math.round((pw * H) / (base * base * 1.25) / 5);
+    const base = Math.max(50, Math.min(W, H) / 7.5);
+    const count = Math.round((pw * H) / (base * base * 1.25) / 2.5);
     for (let i = 0; i < count; i++) {
       const x = left + rand(-base * 0.2, pw + base * 0.2);
       const y = rand(-base * 0.2, H + base * 0.2);
